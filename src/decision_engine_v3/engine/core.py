@@ -32,7 +32,7 @@ class DecisionEngineV3:
             r = safe_execute("signal_cleaning", lambda: clean_signals(content.comments), neutral_cleaning())
             cleaning = r.value
             if not r.success: degraded.append(r.module_name); errors.append(r.error_message)
-        decision.trace.signal_cleaning = {"clean_count": cleaning.clean_comment_count, "dup_ratio": cleaning.duplicate_ratio, "spam_ratio": cleaning.spam_ratio, "uniqueness": cleaning.uniqueness_score}
+        decision.trace.signal_cleaning = {"clean_count": cleaning.clean_comment_count, "dup_ratio": cleaning.duplicate_ratio, "spam_ratio": cleaning.spam_ratio, "uniqueness": cleaning.uniqueness_score, "removed_duplicates": cleaning.removed_duplicates, "removed_spam": cleaning.removed_spam, "removed_noise": cleaning.removed_noise, "degraded": "signal_cleaning" in degraded}
 
         comments = cleaning.clean_comments if self.flags.enable_signal_cleaning else content.comments
 
@@ -41,13 +41,13 @@ class DecisionEngineV3:
         intent = r.value
         if not r.success: degraded.append(r.module_name); errors.append(r.error_message)
         decision.intent_score = intent.qualified_intent if self.flags.enable_qualified_intent else intent.raw_intent
-        decision.trace.intent_engine = {"qualified": intent.qualified_intent, "raw": intent.raw_intent, "density": intent.intent_density, "negative_rate": intent.negative_rate, "strong_share": intent.strong_intent_share}
+        decision.trace.intent_engine = {"qualified": intent.qualified_intent, "raw": intent.raw_intent, "density": intent.intent_density, "negative_rate": intent.negative_rate, "strong_share": intent.strong_intent_share, "penalties": intent.penalties, "high_hits": intent.high_intent_hits, "negative_hits": intent.negative_hits, "degraded": "intent" in degraded}
 
         # 3. Evidence
         r = safe_execute("evidence", lambda: compute_evidence(content, marketplace_raw, cleaning if self.flags.enable_signal_cleaning else None), neutral_evidence())
         evidence = r.value
         if not r.success: degraded.append(r.module_name); errors.append(r.error_message)
-        decision.trace.evidence_engine = {"score": evidence.evidence_score, "comment": evidence.comment_confidence, "volume": evidence.volume_confidence, "click": evidence.click_confidence}
+        decision.trace.evidence_engine = {"score": evidence.evidence_score, "comment": evidence.comment_confidence, "volume": evidence.volume_confidence, "click": evidence.click_confidence, "marketplace": evidence.marketplace_confidence, "gates_triggered": ["evidence_hold"] if evidence.evidence_score < 0.35 else [], "degraded": "evidence" in degraded}
 
         # 4. Anti-viral
         antiviral = neutral_antiviral()
@@ -55,7 +55,7 @@ class DecisionEngineV3:
             r = safe_execute("antiviral", lambda: compute_antiviral(content, intent), neutral_antiviral())
             antiviral = r.value
             if not r.success: degraded.append(r.module_name); errors.append(r.error_message)
-        decision.trace.anti_viral = {"score": antiviral.antiviral_score, "status": antiviral.status, "empty_viral": antiviral.empty_viral_score, "false_viral": antiviral.false_viral_score}
+        decision.trace.anti_viral = {"score": antiviral.antiviral_score, "status": antiviral.status, "empty_viral": antiviral.empty_viral_score, "curiosity_bait": antiviral.curiosity_bait_score, "rage": antiviral.rage_score, "entertainment": antiviral.entertainment_score, "misleading_cta": antiviral.misleading_cta_score, "false_viral": antiviral.false_viral_score, "gates_triggered": ["antiviral_block"] if antiviral.antiviral_score >= 0.6 else [], "degraded": "antiviral" in degraded}
 
         # 5. Marketplace
         mkt = neutral_marketplace()
@@ -69,14 +69,14 @@ class DecisionEngineV3:
         r = safe_execute("economics", lambda: compute_economics(economics_raw), neutral_economics())
         econ = r.value
         if not r.success: degraded.append(r.module_name); errors.append(r.error_message)
-        decision.trace.economics = {"margin": econ.estimated_margin_pct, "status": econ.status, "landed_above": econ.landed_above_market_min}
+        decision.trace.economics = {"margin": econ.estimated_margin_pct, "status": econ.status, "landed_above": econ.landed_above_market_min, "margin_ok": econ.margin_ok, "gates_triggered": ["economics_fail"] if econ.status == "fail" else [], "degraded": "economics" in degraded}
 
         # 7. Viability
         r = safe_execute("viability", lambda: compute_viability(content, intent, evidence, antiviral, mkt), neutral_viability())
         viability = r.value
         if not r.success: degraded.append(r.module_name); errors.append(r.error_message)
         decision.viability = viability.viability
-        decision.trace.viability_engine = {"score": viability.viability, "components": viability.components, "caps": viability.caps_applied}
+        decision.trace.viability_engine = {"score": viability.viability, "components": viability.components, "caps_applied": viability.caps_applied, "degraded": "viability" in degraded}
 
         # 8. Confidence
         conf = neutral_confidence()
@@ -85,7 +85,7 @@ class DecisionEngineV3:
             conf = r.value
             if not r.success: degraded.append(r.module_name); errors.append(r.error_message)
         decision.confidence = conf.confidence
-        decision.trace.confidence_engine = {"score": conf.confidence, "components": conf.components, "penalties": conf.penalties}
+        decision.trace.confidence_engine = {"score": conf.confidence, "components": conf.components, "penalties": conf.penalties, "gates_triggered": ["confidence_cap"] if conf.confidence < 0.30 else [], "degraded": "confidence" in degraded}
 
         # 9. Policy
         from ..policies.explore import decide_explore_action
@@ -101,7 +101,7 @@ class DecisionEngineV3:
         caps = build_caps(evidence, antiviral, conf, econ, mkt, decision.human_rule)
         decision.caps = caps
         decision.action = apply_cap(policy_action, caps)
-        decision.trace.policy_engine = {"raw_action": policy_action.value, "capped_action": decision.action.value, "cap_reasons": [c.value for c in caps.reasons]}
+        decision.trace.policy_engine = {"raw_action": policy_action.value, "capped_action": decision.action.value, "cap_reasons": [c.value for c in caps.reasons], "downgraded": policy_action.value != decision.action.value, "human_rule": decision.human_rule.value}
 
         # 12. Red flags
         decision.red_flags = build_red_flags(content, intent, evidence, antiviral, conf, econ, mkt, viability)
